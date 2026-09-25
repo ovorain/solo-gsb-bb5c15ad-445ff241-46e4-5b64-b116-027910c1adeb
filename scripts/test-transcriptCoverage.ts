@@ -77,6 +77,33 @@ expectThrow(() => parseTranscriptVtt('JSON\n{"chapters":[]}'), 'non-WebVTT throw
   const r = parseTranscriptVtt('\uFEFFWEBVTT\n\n00:00:00.000 --> 00:00:01.000\nA');
   eq(r.cues.length, 1, 'BOM-prefixed WebVTT accepted');
 }
+{
+  // a NOTE block with same-line text and a '-->' lookalike in its body is
+  // skipped wholesale: coverage counts only real, valid cues
+  const { cues, skipped } = parseTranscriptVtt(
+    [
+      'WEBVTT', //                                            line 1
+      '',
+      'NOTE 核对说明', //                                      line 3
+      '这里写的 00:00:01.000 --> 00:00:09.000 是注释不是字幕', // line 4
+      '',
+      '00:00:01.000 --> 00:00:03.000', //                     line 6
+      '你好',
+      '',
+      '00:05.000 --> 00:07.500', //                           line 9 (MM:SS.mmm)
+      '短格式时间码',
+    ].join('\n'),
+  );
+  eq(cues.length, 2, 'NOTE body arrow does not create a transcript cue');
+  eq([cues[0].start, cues[0].end], [1, 3], 'first real cue intact');
+  eq([cues[1].start, cues[1].end], [5, 7.5], 'MM:SS.mmm transcript cue parsed');
+  eq(cues[1].row, 9, 'cue keeps its real source line');
+  eq(skipped, 0, 'well-formed real cues are not skipped');
+  const clipped = clipTranscriptCues(cues, 10);
+  const cov = computeTranscriptCoverage([mk('a', 0, 10)], clipped);
+  approx(cov.totalCoveredSeconds, 4.5, 'coverage union comes from real cues only');
+  approx(cov.byChapter.get('a')!.coveredSeconds, 4.5, 'chapter coverage unpolluted by the note');
+}
 
 // ---- clipping out-of-range cues ----
 {

@@ -41,9 +41,13 @@ eq(parseVttTimestamp('00:00:01.500'), 1.5, 'vtt timestamp basic');
 eq(parseVttTimestamp('01:02:03'), 3723, 'vtt timestamp hms');
 eq(parseVttTimestamp('00:01:02,25'), 62.25, 'vtt comma fraction 2 digits');
 eq(parseVttTimestamp('99:59:59.999'), 359999.999, 'vtt large hours');
+eq(parseVttTimestamp('00:05.000'), 5, 'vtt timestamp mm:ss.mmm');
+eq(parseVttTimestamp('05:30'), 330, 'vtt timestamp mm:ss without fraction');
+eq(parseVttTimestamp('00:05,5'), 5.5, 'vtt mm:ss comma fraction');
 check(parseVttTimestamp('00:60:00') === null, 'vtt minutes >= 60 rejected');
 check(parseVttTimestamp('00:00:60') === null, 'vtt seconds >= 60 rejected');
 check(parseVttTimestamp('1:2') === null, 'vtt missing fields rejected');
+check(parseVttTimestamp('5:30') === null, 'vtt short form needs two-digit minutes');
 check(parseVttTimestamp('garbage') === null, 'vtt garbage rejected');
 
 // ---- WebVTT parsing ----
@@ -83,6 +87,77 @@ check(parseVttTimestamp('garbage') === null, 'vtt garbage rejected');
   const r = parseChapterFile('\uFEFF' + vtt);
   eq(r.format, 'vtt', 'BOM-prefixed webvtt detected');
   eq(r.entries.length, 2, 'BOM webvtt cues parsed');
+}
+{
+  // NOTE with same-line comment text and a '-->' lookalike in its body must
+  // not emit a phantom cue; REGION blocks skip too; MM:SS.mmm cues parse;
+  // rows stay the real 1-based source lines (even across double blank lines)
+  const vtt = [
+    'WEBVTT', //                                        line 1
+    '',
+    'NOTE 说明：下一段要重录', //                         line 3
+    '提到 00:05.000 --> 00:12.000 只是注释，不是 cue', //  line 4
+    '',
+    'REGION', //                                        line 6
+    'id:fred',
+    '',
+    '', //                                              double blank separator
+    '1', //                                             line 10
+    '00:05.000 --> 00:12.000', //                       line 11
+    '开场',
+    '',
+    'bad', //                                           line 14
+    'soon --> later', //                                line 15
+    'broken',
+    '',
+    '00:20.000 --> 00:30.000 align:start', //           line 18
+    '正片',
+  ].join('\n');
+  const r = parseWebVTT(vtt);
+  eq(r.entries.length, 3, 'NOTE-with-text / REGION skipped, no phantom cue');
+  eq([r.entries[0].start, r.entries[0].end], [5, 12], 'mm:ss.mmm cue times parsed');
+  eq(r.entries[0].row, 11, 'cue row is the source line of its timing line');
+  eq(r.entries[0].title, '开场', 'cue title from the payload line');
+  check(!!r.entries[1].error && r.entries[1].row === 15, 'single bad cue still flagged with its row');
+  eq([r.entries[2].start, r.entries[2].end], [20, 30], 'later cue unaffected by the bad one');
+  eq(r.entries[2].row, 18, 'row stays correct across double blank lines');
+}
+{
+  // one bad cue does not block the others: preview flags it, valid rows apply
+  const parsed = parseWebVTT([
+    'WEBVTT',
+    '',
+    'NOTE 说明',
+    '00:05.000 --> 00:12.000 注释里的假时间码',
+    '',
+    '00:05.000 --> 00:12.000',
+    'A',
+    '',
+    'broken --> cue',
+    '',
+    '00:20.000 --> 00:30.000',
+    'B',
+  ].join('\n'));
+  const preview = buildImportPreview(parsed, [], D);
+  eq(
+    preview.entries.map((e) => e.status),
+    ['valid', 'invalid', 'valid'],
+    'bad cue flagged invalid, others still importable',
+  );
+  eq(
+    preview.counts,
+    { total: 3, valid: 2, invalid: 1, outOfBounds: 0, overlap: 0 },
+    'counts reflect the single bad cue',
+  );
+  const merged = applyImportedChapters(preview, [], D);
+  eq(
+    merged.map((c) => [c.start, c.end]),
+    [
+      [5, 12],
+      [20, 30],
+    ],
+    'valid cues applied despite the bad one',
+  );
 }
 
 // ---- JSON parsing ----

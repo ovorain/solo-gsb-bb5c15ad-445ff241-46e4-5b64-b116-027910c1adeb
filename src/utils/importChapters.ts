@@ -50,12 +50,14 @@ const EPS = 1e-6;
 /**
  * Parse a WebVTT timestamp token: `HH:MM:SS.mmm` / `MM:SS.mmm`, fraction
  * separated by '.' or ',' with 1–3 digits. Seconds 00–59 (WebVTT rule);
- * hours/minutes may exceed their nominal field width.
+ * hours may exceed their nominal field width. The short `MM:SS` form
+ * requires two-digit minutes, so a bare `1:2` stays invalid.
  */
 export function parseVttTimestamp(token: string): number | null {
-  const m = /^(\d+):(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(token.trim());
+  const m = /^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(token.trim());
   if (!m) return null;
-  const h = Number(m[1]);
+  if (m[1] === undefined && m[2].length !== 2) return null;
+  const h = m[1] === undefined ? 0 : Number(m[1]);
   const min = Number(m[2]);
   const s = Number(m[3]);
   const frac = m[4] ? Number(m[4].padEnd(3, '0')) / 1000 : 0;
@@ -76,23 +78,35 @@ function cleanVttTitle(text: string): string {
 }
 
 /**
- * Parse standard WebVTT content. NOTE/STYLE/REGION blocks and the file header
- * are skipped; cue settings after the arrow are tolerated. Rows with no
- * timing line (e.g. a dangling cue id) are ignored. A bad timing line is kept
- * as an `invalid` candidate so the preview can point at it.
+ * Parse standard WebVTT content. The file header, NOTE blocks (including
+ * `NOTE some text` with same-line comment text -- the note body may even contain
+ * `-->`), and STYLE / REGION blocks are skipped wholesale; cue settings
+ * after the arrow are tolerated. Rows with no timing line (e.g. a dangling
+ * cue id) are ignored. A bad timing line is kept as an `invalid` candidate
+ * so the preview can point at it; `row` is the 1-based source line of the
+ * cue's timing line.
  */
 export function parseWebVTT(text: string): ParseResult {
   const entries: ImportCandidate[] = [];
-  const blocks = text.replace(/\r\n?/g, '\n').split(/\n{2,}/);
-  let rowOffset = 0;
-  for (const raw of blocks) {
-    const lines = raw.split('\n');
-    const startRow = rowOffset + 1;
-    rowOffset += lines.length + 1; // +1 for the blank separator
-    if (lines.length === 0 || lines.every((l) => l.trim() === '')) continue;
+  const allLines = text.replace(/\r\n?/g, '\n').split('\n');
+  let i = 0;
+  while (i < allLines.length) {
+    // blank lines separate blocks; skip any run of them
+    if (allLines[i].trim() === '') {
+      i += 1;
+      continue;
+    }
+    const startRow = i + 1; // 1-based source line of the block's first line
+    const lines: string[] = [];
+    while (i < allLines.length && allLines[i].trim() !== '') {
+      lines.push(allLines[i]);
+      i += 1;
+    }
     if (/^(?:\uFEFF)?WEBVTT/.test(lines[0])) continue;
-    const tag = lines[0].trim().toUpperCase();
-    if (tag === 'NOTE' || tag === 'STYLE' || tag === 'REGION') continue;
+    // block keywords: NOTE may carry comment text on the same line; STYLE /
+    // REGION may have trailing whitespace -- the whole block is skipped either
+    // way, so a `-->` inside such a block never becomes a cue
+    if (/^(?:NOTE|STYLE|REGION)(?:[ \t]|$)/i.test(lines[0].trim())) continue;
 
     // timing line is the first line containing '-->' (an optional cue id may precede it)
     const timingIdx = lines.findIndex((l) => l.includes('-->'));
@@ -111,7 +125,7 @@ export function parseWebVTT(text: string): ParseResult {
         title: '',
         start: Number.NaN,
         end: Number.NaN,
-        error: '时间码无法解析（应为 HH:MM:SS.mmm --> HH:MM:SS.mmm）',
+        error: '时间码无法解析（应为 HH:MM:SS.mmm 或 MM:SS.mmm --> …）',
       });
       continue;
     }
