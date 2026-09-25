@@ -50,12 +50,15 @@ const EPS = 1e-6;
 /**
  * Parse a WebVTT timestamp token: `HH:MM:SS.mmm` / `MM:SS.mmm`, fraction
  * separated by '.' or ',' with 1–3 digits. Seconds 00–59 (WebVTT rule);
- * hours/minutes may exceed their nominal field width.
+ * hours/minutes may exceed their nominal field width. The short `MM:SS`
+ * form requires a two-digit minute field (WebVTT rule), so `1:2` is not
+ * a timestamp; the long form keeps the historical 1–2 digit tolerance.
  */
 export function parseVttTimestamp(token: string): number | null {
-  const m = /^(\d+):(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(token.trim());
+  const m = /^(?:(\d+):)?(\d{1,2}):(\d{1,2})(?:[.,](\d{1,3}))?$/.exec(token.trim());
   if (!m) return null;
-  const h = Number(m[1]);
+  if (m[1] === undefined && m[2].length !== 2) return null;
+  const h = m[1] === undefined ? 0 : Number(m[1]);
   const min = Number(m[2]);
   const s = Number(m[3]);
   const frac = m[4] ? Number(m[4].padEnd(3, '0')) / 1000 : 0;
@@ -76,23 +79,51 @@ function cleanVttTitle(text: string): string {
 }
 
 /**
- * Parse standard WebVTT content. NOTE/STYLE/REGION blocks and the file header
- * are skipped; cue settings after the arrow are tolerated. Rows with no
- * timing line (e.g. a dangling cue id) are ignored. A bad timing line is kept
- * as an `invalid` candidate so the preview can point at it.
+ * Parse standard WebVTT content. The file header and NOTE / STYLE / REGION
+ * blocks are skipped as a whole — a NOTE may carry inline text (`NOTE 说明`)
+ * and its body is never scanned for cues, so a `-->` inside a comment cannot
+ * produce a fake cue. Cue settings after the arrow are tolerated. Rows with
+ * no timing line (e.g. a dangling cue id) are ignored. A bad timing line is
+ * kept as an `invalid` candidate so the preview can point at it; every other
+ * cue still parses. `row` is the exact 1-based source line of the timing
+ * line, even across runs of blank lines.
  */
 export function parseWebVTT(text: string): ParseResult {
   const entries: ImportCandidate[] = [];
-  const blocks = text.replace(/\r\n?/g, '\n').split(/\n{2,}/);
-  let rowOffset = 0;
-  for (const raw of blocks) {
-    const lines = raw.split('\n');
-    const startRow = rowOffset + 1;
-    rowOffset += lines.length + 1; // +1 for the blank separator
-    if (lines.length === 0 || lines.every((l) => l.trim() === '')) continue;
+  // Group lines into blocks separated by empty lines, tracking each block's
+  // exact 1-based start row (splitting on /\n{2,}/ would lose count of the
+  // consumed blank lines and drift the reported row numbers).
+  const blocks: { startRow: number; lines: string[] }[] = [];
+  let cur: string[] = [];
+  let curStart = 0; // 0-based line index of cur[0]
+  const allLines = text.replace(/\r\n?/g, '\n').split('\n');
+  allLines.forEach((line, i) => {
+    if (line === '') {
+      if (cur.length > 0) {
+        blocks.push({ startRow: curStart + 1, lines: cur });
+        cur = [];
+      }
+      return;
+    }
+    if (cur.length === 0) curStart = i;
+    cur.push(line);
+  });
+  if (cur.length > 0) blocks.push({ startRow: curStart + 1, lines: cur });
+
+  for (const { startRow, lines } of blocks) {
     if (/^(?:\uFEFF)?WEBVTT/.test(lines[0])) continue;
     const tag = lines[0].trim().toUpperCase();
-    if (tag === 'NOTE' || tag === 'STYLE' || tag === 'REGION') continue;
+    // NOTE may be followed by inline text on the same line; STYLE / REGION
+    // are bare keywords. In every case the whole block is skipped.
+    if (
+      tag === 'STYLE' ||
+      tag === 'REGION' ||
+      tag === 'NOTE' ||
+      tag.startsWith('NOTE ') ||
+      tag.startsWith('NOTE\t')
+    ) {
+      continue;
+    }
 
     // timing line is the first line containing '-->' (an optional cue id may precede it)
     const timingIdx = lines.findIndex((l) => l.includes('-->'));
@@ -111,7 +142,7 @@ export function parseWebVTT(text: string): ParseResult {
         title: '',
         start: Number.NaN,
         end: Number.NaN,
-        error: '时间码无法解析（应为 HH:MM:SS.mmm --> HH:MM:SS.mmm）',
+        error: '时间码无法解析（应为 HH:MM:SS.mmm 或 MM:SS.mmm --> HH:MM:SS.mmm）',
       });
       continue;
     }

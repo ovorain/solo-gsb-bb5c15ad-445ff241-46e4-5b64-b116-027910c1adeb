@@ -41,9 +41,13 @@ eq(parseVttTimestamp('00:00:01.500'), 1.5, 'vtt timestamp basic');
 eq(parseVttTimestamp('01:02:03'), 3723, 'vtt timestamp hms');
 eq(parseVttTimestamp('00:01:02,25'), 62.25, 'vtt comma fraction 2 digits');
 eq(parseVttTimestamp('99:59:59.999'), 359999.999, 'vtt large hours');
+eq(parseVttTimestamp('00:05.000'), 5, 'vtt timestamp mm:ss.mmm');
+eq(parseVttTimestamp('00:12.000'), 12, 'vtt timestamp mm:ss');
+eq(parseVttTimestamp('12:34,500'), 754.5, 'vtt mm:ss comma fraction');
 check(parseVttTimestamp('00:60:00') === null, 'vtt minutes >= 60 rejected');
 check(parseVttTimestamp('00:00:60') === null, 'vtt seconds >= 60 rejected');
 check(parseVttTimestamp('1:2') === null, 'vtt missing fields rejected');
+check(parseVttTimestamp('5:30') === null, 'vtt single-digit minute mm:ss rejected');
 check(parseVttTimestamp('garbage') === null, 'vtt garbage rejected');
 
 // ---- WebVTT parsing ----
@@ -83,6 +87,38 @@ check(parseVttTimestamp('garbage') === null, 'vtt garbage rejected');
   const r = parseChapterFile('\uFEFF' + vtt);
   eq(r.format, 'vtt', 'BOM-prefixed webvtt detected');
   eq(r.entries.length, 2, 'BOM webvtt cues parsed');
+}
+{
+  // NOTE with inline text + a '-->' in its body must not become a fake cue;
+  // MM:SS.mmm timecodes parse; rows stay exact across blank-line runs
+  const vtt = [
+    'WEBVTT', // 1
+    '', // 2
+    'NOTE 说明', // 3
+    '注释里提到 00:01.000 --> 00:02.000 这样的时间码', // 4
+    '', // 5
+    '', // 6
+    '00:05.000 --> 00:12.000', // 7
+    '开场', // 8
+    '', // 9
+    'REGION', // 10
+    'region:id', // 11
+    '', // 12
+    '2', // 13
+    '00:00:20.000 --> 00:00:30.000', // 14
+    '正文', // 15
+    '', // 16
+    'bad --> cue', // 17
+    '坏掉的', // 18
+  ].join('\n');
+  const r = parseWebVTT(vtt);
+  eq(r.entries.length, 3, 'NOTE with inline text skipped as a block, no fake cue');
+  eq([r.entries[0].start, r.entries[0].end], [5, 12], 'MM:SS.mmm cue parsed');
+  eq(r.entries[0].title, '开场', 'MM:SS.mmm cue title');
+  eq(r.entries[0].row, 7, 'cue row exact across blank-line run');
+  eq([r.entries[1].start, r.entries[1].end], [20, 30], 'cue after REGION block parsed');
+  eq(r.entries[1].row, 14, 'cue-id row exact after REGION block');
+  check(!!r.entries[2].error && r.entries[2].row === 17, 'bad cue still flagged with its source row');
 }
 
 // ---- JSON parsing ----
@@ -155,6 +191,24 @@ expectThrow(() => parseChapterFile('   '), 'empty file throws');
   );
   const preview = buildImportPreview(parsed, [mk('e', 0, 10)], D);
   check(preview.entries.every((e) => e.status === 'valid'), 'edge-touching cues are valid');
+}
+{
+  // MM:SS.mmm cues flow through preview/apply; one bad cue does not abort the rest
+  const parsed = parseWebVTT(
+    ['WEBVTT', '', '00:05.000 --> 00:12.000', 'A', '', 'oops --> 00:20.000', 'B'].join('\n'),
+  );
+  const preview = buildImportPreview(parsed, [], D);
+  eq(
+    preview.entries.map((e) => e.status),
+    ['valid', 'invalid'],
+    'MM:SS cue valid, bad cue flagged, rest of file still imports',
+  );
+  const merged = applyImportedChapters(preview, [], D);
+  eq(
+    merged.map((c) => [c.start, c.end]),
+    [[5, 12]],
+    'only the valid MM:SS cue is applied',
+  );
 }
 
 // ---- apply: ids rebuilt, sorted, non-overlapping, titles numbered ----
